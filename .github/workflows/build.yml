@@ -1,8 +1,13 @@
-name: build
+name: build-and-publish
 
 on:
   push:
+    branches: [ master ]
   pull_request:
+
+permissions:
+  contents: read
+  packages: write
 
 jobs:
   build:
@@ -16,3 +21,26 @@ jobs:
         run: dotnet build OfficeFoosball.csproj --configuration Release
       - name: Docker build
         run: docker build -t office-foosball-ci .
+
+  publish:
+    if: github.event_name == 'push'
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/chandu1507/githubdotnet:latest
+            ghcr.io/chandu1507/githubdotnet:${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/chandu1507/GitHubDotNet
