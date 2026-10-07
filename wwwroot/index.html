@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Office Foosball</title>
+<style>
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:#0b1220;color:#e5e7eb;font-family:"Segoe UI",system-ui,Arial,sans-serif;overflow:hidden}
+canvas{display:block}
+#menu{position:fixed;inset:0;overflow:auto;background:radial-gradient(ellipse at top,#16233d,#0b1220 70%);display:flex;justify-content:center;align-items:flex-start;padding:28px 12px}
+#menu.hidden{display:none}
+.card{width:min(1040px,100%);background:#111a2e;border:1px solid #24324f;border-radius:14px;padding:22px 26px;box-shadow:0 20px 60px rgba(0,0,0,.5)}
+h1{margin:0 0 4px;font-size:30px}
+h2{font-size:18px;margin:22px 0 8px;color:#cbd5e1}
+.sub{color:#94a3b8;margin:0 0 14px}
+.row{display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin:10px 0}
+button{background:#1f2c49;color:#e5e7eb;border:1px solid #33456b;border-radius:8px;padding:8px 14px;font-size:14px;cursor:pointer}
+button:hover{background:#2a3b61}
+button.primary{background:#16a34a;border-color:#22c55e;font-size:17px;padding:11px 26px;font-weight:600}
+button.primary:hover{background:#15803d}
+table{border-collapse:collapse;width:100%}
+th,td{padding:6px 8px;border-bottom:1px solid #22304d;text-align:left;font-size:14px;vertical-align:middle}
+th{color:#94a3b8;font-weight:600}
+input[type=text],select{background:#0b1324;color:#e5e7eb;border:1px solid #33456b;border-radius:6px;padding:6px 8px;font-size:14px}
+input[type=text]{width:140px}
+.teamA{color:#60a5fa;font-weight:700}.teamB{color:#f87171;font-weight:700}
+kbd{background:#0b1324;border:1px solid #33456b;border-bottom-width:2px;border-radius:4px;padding:1px 5px;font-size:12px;font-family:Consolas,monospace;white-space:nowrap}
+.keys{font-size:12px;color:#cbd5e1;line-height:1.9}
+details{margin-top:18px;color:#cbd5e1;font-size:14px;line-height:1.55}
+summary{cursor:pointer;font-weight:600}
+.muted{color:#94a3b8;font-size:13px}
+.hidden{display:none!important}
+.onlineBox{margin:16px 0 20px;padding:16px;border:1px solid #33456b;border-radius:12px;background:#0d172a}
+.onlineBox h2{margin:0 0 10px}.onlineBox input[type=text]{width:180px}
+.status{min-height:20px;color:#93c5fd;font-size:13px}.status.error{color:#fca5a5}
+#onlineLobby{position:fixed;inset:0;overflow:auto;background:radial-gradient(ellipse at top,#16233d,#0b1220 70%);display:flex;justify-content:center;align-items:flex-start;padding:28px 12px;z-index:20}
+#onlineLobby .card{max-width:760px}.roomCode{font:700 30px Consolas,monospace;letter-spacing:6px;color:#facc15}
+.lobbySeat{display:flex;justify-content:space-between;gap:16px;padding:10px 0;border-bottom:1px solid #22304d}.connected{color:#86efac}.waiting{color:#94a3b8}
+.onlineBadge{font-size:12px;padding:2px 7px;border-radius:999px;background:#1e293b;color:#93c5fd;border:1px solid #334155}
+</style>
+</head>
+<body>
+<canvas id="cv"></canvas>
+
+<div id="menu">
+ <div class="card">
+  <h1>⚽ Office Foosball</h1>
+  <p class="sub">Single file, works offline. One screen, shared keyboards (2 keyboards recommended for 4 players).</p>
+  <div class="onlineBox">
+   <h2>🌐 Online match <span class="onlineBadge">SignalR</span></h2>
+   <div class="row"><label>Your name <input type="text" id="onlineName" maxlength="14" placeholder="Your name"></label><label>Mode <select id="onlineMode"><option value="1v1">1 v 1</option><option value="2v2" selected>2 v 2</option></select></label><button class="primary" id="onlineCreate">Create room</button></div>
+   <div class="row"><label>Room code <input type="text" id="onlineRoomCode" maxlength="5" placeholder="ABCDE" style="text-transform:uppercase"></label><button id="onlineJoin">Join room</button><span id="onlineMenuStatus" class="status"></span></div>
+   <div class="muted">Online controls: arrows or WASD · Space/E kick · Q switch rod · 1–4 pick rod. Every laptop can use the same keys.</div>
+  </div>
+
+  <div class="row"><b>Quick setup:</b>
+   <button data-preset="solo">🧪 Solo test: me vs bot</button>
+   <button data-preset="practice">🎯 Practice: me vs idle dummy</button>
+   <button data-preset="duel">⚔️ 1v1 humans</button>
+   <button data-preset="2v2">👥 2v2 humans</button>
+   <button data-preset="watch">🍿 Bots only (watch)</button>
+  </div>
+
+  <div class="row"><b>Mode:</b>
+   <label><input type="radio" name="mode" value="1v1"> 1 v 1 (each player has all 4 rods)</label>
+   <label><input type="radio" name="mode" value="2v2"> 2 v 2 (2 rods per player)</label>
+  </div>
+
+  <table>
+   <thead><tr><th>Seat</th><th>Team</th><th>Rods</th><th>Name</th><th>Played by</th><th>Keys</th></tr></thead>
+   <tbody id="seatRows"></tbody>
+  </table>
+
+  <div class="row">
+   <label>First to <select id="target"><option>3</option><option selected>5</option><option>7</option><option>10</option></select></label>
+   <label>Bot level <select id="level"><option value="easy">Easy</option><option value="normal" selected>Normal</option><option value="hard">Hard</option></select></label>
+   <label><input type="checkbox" id="auto"> Auto-select the rod nearest the ball (humans)</label>
+   <label><input type="checkbox" id="sound"> Sound</label>
+  </div>
+
+  <div class="row"><button class="primary" id="start">▶ Start match</button>
+   <span class="muted">In game: <kbd>Esc</kbd> pause · <kbd>Backspace</kbd> re-serve / skip replay · <kbd>`</kbd> debug hitboxes</span></div>
+
+  <h2>🏆 Office leaderboard <span class="muted">(stored in this browser only; bots excluded)</span></h2>
+  <table><thead><tr><th>#</th><th>Player</th><th>W</th><th>L</th><th>Goals</th><th>Own goals</th><th>Played</th></tr></thead><tbody id="lbRows"></tbody></table>
+  <div class="row"><button id="lbReset">Reset leaderboard</button></div>
+
+  <details>
+   <summary>How to play</summary>
+   <ul>
+    <li><b>Slide</b> (left/right keys): continuous movement. Hold to accelerate; release and the rod stops exactly there.</li>
+    <li><b>Tilt</b> (up/down keys): tilts the feet toward the top/bottom of the screen. The angle stays where you leave it.
+     <ul>
+      <li><b>Upright</b>: figures block the ball.</li>
+      <li><b>Tilted far back</b> (feet faded): the ball rolls underneath. Lift your front rods so your own shots get through.</li>
+      <li><b>Tilted slightly forward</b> (yellow foot outline): traps a slow ball. Slide to carry it, then kick for a <b>pin shot</b> (+25% power). There's a 10-second pin limit.</li>
+     </ul></li>
+    <li><b>Kick</b>: a fast forward swing. Hit the ball off-center to angle the shot, and slide while kicking to add spin. Kicking from a tilted-back angle is a wind-up and adds 20% power.</li>
+    <li>Long rallies speed the ball up. A stuck ball is re-served after 3 seconds.</li>
+    <li>Pressing Shift 5 times opens Windows Sticky Keys, so no Shift key is used for kicking.</li>
+   </ul>
+  </details>
+ </div>
+</div>
+<div id="onlineLobby" class="hidden"><div class="card">
+ <h1>🌐 Online Foosball</h1><p class="sub">Share this room code with your office mates.</p>
+ <div class="row"><span>Room</span><span id="lobbyCode" class="roomCode">-----</span><button id="copyRoomLink">Copy invite link</button></div>
+ <h2 id="lobbyMode">2 v 2</h2><div id="lobbySeats"></div>
+ <div id="hostLobbySettings" class="onlineBox hidden"><div class="row"><label>First to <select id="onlineTarget"><option>3</option><option selected>5</option><option>7</option><option>10</option></select></label><label><input type="checkbox" id="onlineAuto" checked> Auto-select nearest rod</label><label><input type="checkbox" id="onlineSound" checked> Sound</label></div><button class="primary" id="onlineStart" disabled>Start online match</button></div>
+ <div class="row"><button id="onlineLeave">Leave room</button><span id="lobbyStatus" class="status"></span></div>
+</div></div>
+
+<script src="/game-1.js"></script>
+<script src="/game-2.js"></script>
+<script src="/game-3.js"></script>
+<script src="/game-4.js"></script>
+<script src="/lib/signalr/signalr.min.js"></script>
+<script>if(typeof signalR==='undefined')document.write('<script src="https://cdn.jsdelivr.net/npm/@microsoft/signalr@10.0.11/dist/browser/signalr.min.js"><\/script>');</script>
+<script src="/online.js"></script>
+</body>
+</html>
