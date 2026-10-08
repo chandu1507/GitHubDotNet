@@ -14,6 +14,9 @@ const online = {
   matchStarted:false, matchCfg:null, inputs:{}, remoteTarget:null,
   lastSnapshotMs:0, publishInFlight:false
 };
+const ONLINE_SNAPSHOT_MS = 33; // ~30 Hz: lower remote visual latency than the original 20 Hz
+const OWN_RECONCILE_ACTIVE = 5; // gentle host correction while the participant is actively moving
+const OWN_RECONCILE_IDLE = 18;  // settle quickly to authoritative state after input stops
 function freshOnlineInput() { return { left:false, right:false, up:false, down:false }; }
 function clearOnlineInputs() { online.inputs={P1:freshOnlineInput(),P2:freshOnlineInput(),P3:freshOnlineInput(),P4:freshOnlineInput()}; }
 clearOnlineInputs();
@@ -132,10 +135,40 @@ function applyOnlineInput(seatId,action,pressed) {
   if(action==='kick'&&(G.state==='play'||G.state==='ready')) startKick(rod);
   if(action==='switch'){seat.sel=(seat.sel+1)%seat.rods.length;seat.manualT=1.5;}
 }
+function applyParticipantPredictionAction(action,pressed) {
+  if(online.isHost||!online.matchStarted||!online.seatId) return;
+  const seat=seatById(online.seatId); if(!seat) return;
+  const input=online.inputs[online.seatId]||(online.inputs[online.seatId]=freshOnlineInput());
+
+  if(ONLINE_CONTINUOUS.has(action)) { input[action]=pressed; return; }
+  if(!pressed) return;
+
+  if(action.startsWith('select')) {
+    const idx=+action.slice(6)-1;
+    if(idx>=0&&idx<seat.rods.length){seat.sel=idx;seat.manualT=1.5;}
+    return;
+  }
+
+  if(action==='switch'){
+    seat.sel=(seat.sel+1)%seat.rods.length;
+    seat.manualT=1.5;
+    return;
+  }
+
+  if(action==='kick'&&(G.state==='play'||G.state==='ready')){
+    const r=G.rods[seat.rods[seat.sel]];
+    if(!r.kick||r.kick.t>=KICK_OUT+KICK_BACK*0.5){
+      r.kick={t:0,base:r.ang,windup:r.ang<-30,predicted:true};
+    }
+  }
+}
 function sendOrApplyOnlineInput(action,pressed) {
   if(!online.active||!online.seatId) return;
   if(online.isHost) applyOnlineInput(online.seatId,action,pressed);
-  else if(online.connection) online.connection.send('SendInput',online.roomCode,action,pressed).catch(onlineError);
+  else {
+    applyParticipantPredictionAction(action,pressed);
+    if(online.connection) online.connection.send('SendInput',online.roomCode,action,pressed).catch(onlineError);
+  }
 }
 function onlineKeyDown(e) {
   if(!online.active) return;
@@ -189,7 +222,7 @@ function currentOnlineView(){
   return{bx:G.ball.x,by:G.ball.y,rods:G.rods.map(r=>[r.c,rodAngle(r)]),replay:false};
 }
 function publishOnlineSnapshot(ts){
-  if(!online.connection||online.publishInFlight||ts-online.lastSnapshotMs<50)return;
+  if(!online.connection||online.publishInFlight||ts-online.lastSnapshotMs<ONLINE_SNAPSHOT_MS)return;
   online.lastSnapshotMs=ts;
   const snapshot={view:currentOnlineView(),state:G.state,paused:G.paused,score:{...G.score},target:G.target,touches:G.touches,mult:G.mult,winner:G.winner,banner:G.banner?{...G.banner}:null,shake:G.shake,ballPinned:!!G.ball.pin,selections:G.seats.map(s=>({id:s.id,sel:s.sel}))};
   online.publishInFlight=true;online.connection.send('PublishState',online.roomCode,snapshot).catch(()=>{}).finally(()=>online.publishInFlight=false);
@@ -202,17 +235,60 @@ function applyOnlineSnapshot(s){
   if(G.score.A!==prevA||G.score.B!==prevB)sfx('goal');if(G.state==='over'&&prevState!=='over')sfx('win');
   if(Array.isArray(s.selections))for(const x of s.selections){const seat=seatById(x.id);if(seat)seat.sel=x.sel;}
 }
+function predictLocalParticipant(dt){
+  if(online.isHost||!online.matchStarted||!online.seatId||G.paused)return;
+  if(G.state!=='play'&&G.state!=='ready')return;
+
+  const seat=seatById(online.seatId); if(!seat)return;
+  const input=online.inputs[online.seatId]||freshOnlineInput();
+  const r=G.rods[seat.rods[seat.sel]]; if(!r)return;
+
+  const mv=(input.right?1:0)-(input.left?1:0);
+  if(mv){
+    r.hold+=dt;
+    r.c+=mv*(SLIDE_MIN+(SLIDE_MAX-SLIDE_MIN)*Math.min(1,r.hold/0.25))*dt;
+  }else r.hold=0;
+
+  const tilt=(input.up?1:0)-(input.down?1:0);
+  if(tilt)r.ang=clamp(r.ang+tilt*(-r.dir)*ANG_RATE*dt,-90,90);
+  r.c=clamp(r.c,r.min,r.max);
+
+  if(r.kick&&r.kick.predicted){
+    r.kick.t+=dt;
+    if(r.kick.t>KICK_OUT+KICK_BACK)r.kick=null;
+  }
+}
 function interpolateRemoteState(dt){
-  const b=online.remoteTarget;if(!b)return;const k=1-Math.exp(-24*dt);
+  const b=online.remoteTarget;if(!b)return;
+  const k=1-Math.exp(-28*dt);
   G.ball.x+=(b.bx-G.ball.x)*k;G.ball.y+=(b.by-G.ball.y)*k;
-  for(let i=0;i<G.rods.length&&i<b.rods.length;i++){const r=G.rods[i];r.kick=null;r.c+=(b.rods[i][0]-r.c)*k;r.ang+=(b.rods[i][1]-r.ang)*k;}
+
+  const ownSeat=seatById(online.seatId);
+  const ownRods=new Set(ownSeat?ownSeat.rods:[]);
+  const input=online.inputs[online.seatId]||freshOnlineInput();
+  const ownInputActive=input.left||input.right||input.up||input.down;
+
+  for(let i=0;i<G.rods.length&&i<b.rods.length;i++){
+    const r=G.rods[i],isOwn=ownRods.has(i);
+    const correctionRate=isOwn?(ownInputActive?OWN_RECONCILE_ACTIVE:OWN_RECONCILE_IDLE):28;
+    const rk=1-Math.exp(-correctionRate*dt);
+
+    // Keep a locally-predicted kick animation until it finishes; host state still corrects the base angle.
+    if(!(isOwn&&r.kick&&r.kick.predicted))r.kick=null;
+    r.c+=(b.rods[i][0]-r.c)*rk;
+    r.ang+=(b.rods[i][1]-r.ang)*rk;
+  }
 }
 
 frame=function(ts){
   const dt=Math.min(0.05,(ts-lastTs)/1000||0);lastTs=ts;if(dt>0)G.fps=G.fps*0.95+(1/dt)*0.05;
   if(G.state!=='menu'){
-    if(online.active&&!online.isHost)interpolateRemoteState(dt);
-    else if(!G.paused){G.acc+=dt;while(G.acc>=STEP){fixedStep(STEP);G.acc-=STEP;}updateFx(dt);}
+    if(online.active&&!online.isHost){
+      interpolateRemoteState(dt);
+      predictLocalParticipant(dt);
+    }else if(!G.paused){
+      G.acc+=dt;while(G.acc>=STEP){fixedStep(STEP);G.acc-=STEP;}updateFx(dt);
+    }
   }
   if(online.active&&online.isHost&&online.matchStarted)publishOnlineSnapshot(ts);
   render();requestAnimationFrame(frame);
